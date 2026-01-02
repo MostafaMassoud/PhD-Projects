@@ -3,9 +3,9 @@
 
 This script:
 1) executes baseline GSK under the configured experiment protocol,
-2) writes summary CSVs under ``results/``,
+2) writes summary CSVs under ``results/<alg_name>/summary``,
 3) compares them to reference results under ``previous_results/gsk``,
-4) writes detailed comparison artifacts under ``validation/``, and
+4) writes detailed comparison artifacts under ``results/<alg_name>/summary``, and
 5) exits with non-zero status if mismatches exceed tolerances.
 
 Examples
@@ -47,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude", type=str, default="2", help="Excluded functions (default: 2)")
     p.add_argument("--runs", type=int, default=51, help="Number of runs (default: 51)")
 
+    p.add_argument("--alg-name", type=str, default="GSK-Baseline", help="Results subfolder name under ./results (default: GSK-Baseline)")
+
     p.add_argument("--abs-tol", type=float, default=0.0, help="Absolute tolerance per metric")
     p.add_argument("--rel-tol", type=float, default=0.0, help="Relative tolerance per metric")
 
@@ -76,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         exclude_funcs=tuple(int(f) for f in exclude),
         runs=int(args.runs),
         project_root=root,
+        alg_name=str(args.alg_name),
     )
 
     cec_root = Path(args.cec_root).resolve() if args.cec_root else None
@@ -85,11 +88,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2) Validate summaries
     reference_dir = Path(args.reference_dir).resolve() if args.reference_dir else None
-    artifacts_dir = Path(args.artifacts_dir).resolve() if args.artifacts_dir else None
+    artifacts_dir = Path(args.artifacts_dir).resolve() if args.artifacts_dir else cfg.summary_dir()
 
     res = validate_against_reference(
         project_root=root,
-        results_dir=cfg.results_dir(),
+        results_dir=cfg.summary_dir(),
         reference_dir=reference_dir,
         dims=dims if not bool(args.smoke) else (10,),
         abs_tol=float(args.abs_tol),

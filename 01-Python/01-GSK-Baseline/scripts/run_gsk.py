@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--base-seed", type=int, default=123456, help="Base seed (default: 123456)")
     p.add_argument("--stride-run", type=int, default=9973, help="Seed stride per function (default: 9973)")
 
+    p.add_argument("--alg-name", type=str, default="GSK-Baseline", help="Results subfolder name under ./results (default: GSK-Baseline)")
+
     p.add_argument("--cec-root", type=str, default=None, help="Override path to external CEC2017 folder")
 
     p.add_argument("--smoke", action="store_true", help="Run a reduced suite for quick verification")
@@ -75,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         base_seed=int(args.base_seed),
         stride_run=int(args.stride_run),
         project_root=root,
+        alg_name=str(args.alg_name),
     )
 
     cec_root = Path(args.cec_root).resolve() if args.cec_root else None

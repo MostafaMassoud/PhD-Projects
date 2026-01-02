@@ -1,41 +1,28 @@
 # Baseline GSK (Gaining–Sharing Knowledge) — Publication-Grade Baseline (CEC2017)
 
-## Quick start (step-by-step)
+## Quickstart (step-by-step)
 
-### Minimal commands (copy/paste)
-
-From the project root (the folder containing ``scripts/`` and ``src/``):
-
-```bash
-pip install -r requirements.txt
-
-python scripts/run_gsk.py --runs 51 --dims 10 30 50 100
-python scripts/validate_gsk.py --abs-tol 0 --rel-tol 0
-```
-
-### What the commands do
-
-1) **Install dependencies** (NumPy only)
+1) Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2) **Run the full CEC2017 protocol** (29 functions: F1..F30 excluding F2, dimensions 10/30/50/100, 51 runs each)
+2) Run the full CEC2017 protocol (29 functions by default; F2 excluded) for the standard dimensions:
 
 ```bash
 python scripts/run_gsk.py --runs 51 --dims 10 30 50 100
 ```
 
-3) **Validate correctness** against the authoritative reference CSVs in ``previous_results/gsk``
+3) Validate results against the provided reference summaries:
 
 ```bash
 python scripts/validate_gsk.py --abs-tol 0 --rel-tol 0
 ```
 
-Validation artifacts are written to the ``validation/`` folder.
-
----
+Notes:
+- The external CEC2017 Python implementation must be available at `../00-CEC2017` (relative to this project) or provided via `--cec-root`.
+- Outputs are written under `results/<alg_name>/...` (see **Outputs** below).
 
 This package contains a **clean, baseline implementation** of the
 **Gaining–Sharing Knowledge (GSK)** metaheuristic optimizer in Python.
@@ -111,11 +98,6 @@ Expected layouts are either:
 - `../00-CEC2017/cec2017/functions.py`  (package directly), or
 - `../00-CEC2017/cec2017/cec2017/functions.py` (wrapper folder + package folder).
 
-The runner also supports a common **flat layout** where the contents of the upstream
-``cec2017`` package are copied directly into ``../00-CEC2017``:
-
-- `../00-CEC2017/functions.py` (with sibling modules like `simple.py`, `hybrid.py`, `composition.py`)
-
 The runner will automatically add the correct folder to `sys.path`.
 
 ---
@@ -130,10 +112,11 @@ python scripts/run_gsk.py --runs 51 --dims 10 30 50 100
 
 Outputs:
 
-- `results/Summary_All_Results_D10.csv`
-- `results/Summary_All_Results_D30.csv`
-- `results/Summary_All_Results_D50.csv`
-- `results/Summary_All_Results_D100.csv`
+- `results/<alg_name>/summary/Summary_All_Results_D10.csv`
+- `results/<alg_name>/gen_logs/` (run logs + per-run CSVs)
+- `results/<alg_name>/summary/Summary_All_Results_D30.csv`
+- `results/<alg_name>/summary/Summary_All_Results_D50.csv`
+- `results/<alg_name>/summary/Summary_All_Results_D100.csv`
 
 CSV schema (exact):
 
@@ -157,9 +140,9 @@ python scripts/run_gsk.py --smoke
 
 This will:
 1) run baseline GSK with matching settings,
-2) write new `results/Summary_All_Results_D*.csv`,
+2) write new `results/<alg_name>/summary/Summary_All_Results_D*.csv`,
 3) compare them to `previous_results/gsk/Summary_All_Results_D*.csv`,
-4) write detailed artifacts into `validation/`, and
+4) write detailed artifacts into `results/<alg_name>/summary/`, and
 5) exit with non-zero code if mismatches exceed tolerances.
 
 ```bash
@@ -183,11 +166,10 @@ python scripts/validate_gsk.py --smoke --abs-tol 1e-8 --rel-tol 1e-8
 - The implementation uses `numpy.random.RandomState` and a MATLAB-compatible
   `rand()` helper (`rand_matlab`) using **Fortran-order reshape**.
 
-- Each run prints environment metadata and writes a JSON config snapshot under `logs/`.
+- Each run prints environment metadata and writes environment/config JSON snapshots under `results/<alg_name>/gen_logs/`.
 
 ---
 
 ## License
 
 This code is intended as a research-grade baseline implementation.
-
