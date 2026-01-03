@@ -65,13 +65,13 @@ def print_platform_info():
         print("PyTorch: Not installed (using NumPy-only mode)")
 
 
-def run_demo(detailed: bool = False):
+def run_demo(detailed: bool = False, cec_path: str = None):
     """Run quick demonstration of LA-DRL-GSK."""
     from la_drl_gsk import (
         LADRLGSK, LADRLGSKConfig, create_baseline_gsk, configure_threads,
         OptimizationLogger
     )
-    from la_drl_gsk.cec2017_benchmark import get_cec2017_function
+    from la_drl_gsk.cec2017_benchmark import get_cec2017_function, get_cec2017_source
     
     # Configure threads
     configure_threads()
@@ -82,10 +82,13 @@ def run_demo(detailed: bool = False):
     n_runs = 3 if detailed else 5
     
     try:
-        objective, f_opt = get_cec2017_function(func_id, dim)
+        objective, f_opt = get_cec2017_function(func_id, dim, cec_path=cec_path)
+        source = get_cec2017_source()
+        cec_label = f"CEC2017 ({source})" if source else "CEC2017"
     except Exception as e:
         print(f"Warning: CEC2017 not available ({e})")
         print("Using synthetic test function...")
+        cec_label = "Synthetic"
         f_opt = func_id * 100
         def objective(x):
             x = np.atleast_2d(x)
@@ -117,7 +120,7 @@ def run_demo(detailed: bool = False):
         
         print_platform_info()
         
-        print(f"\nBenchmark: CEC2017 F{func_id} (D={dim})")
+        print(f"\nBenchmark: {cec_label} F{func_id} (D={dim})")
         print(f"Running {n_runs} trials each for baseline and LA-DRL-GSK...")
         
         # Run baseline GSK
@@ -267,9 +270,15 @@ def run_train(args):
 
 def run_evaluate(args):
     """Run evaluation."""
-    from la_drl_gsk.experiments import BenchmarkEvaluator, ExperimentConfig
+    from la_drl_gsk.experiments import BenchmarkEvaluator, ExperimentConfig, StatisticalAnalyzer
+    from la_drl_gsk.cec2017_benchmark import CEC2017_FUNCTIONS
+    import pandas as pd
+    
+    # Use specified func_ids or all CEC2017 functions
+    func_ids = args.func_ids if args.func_ids else CEC2017_FUNCTIONS
     
     config = ExperimentConfig(
+        func_ids=func_ids,
         dims=args.dims,
         n_runs=args.runs,
         model_path=args.model,
@@ -279,13 +288,61 @@ def run_evaluate(args):
     
     evaluator = BenchmarkEvaluator(config)
     
+    # Determine backend based on model availability
+    backend = "heuristic"
+    if args.model and Path(args.model).exists():
+        backend = "sb3"
+        print(f"\nUsing SB3 model: {args.model}")
+    else:
+        print("\nUsing heuristic controller (no --model provided or file not found)")
+    
+    # Show what will be evaluated
+    print(f"Functions to evaluate: {len(func_ids)} (IDs: {func_ids[:5]}{'...' if len(func_ids) > 5 else ''})")
+    
     # Run LA-DRL-GSK
-    df = evaluator.run_full_evaluation(use_rl=True, algorithm_name='LA-DRL-GSK')
+    df_ladrl = evaluator.run_full_evaluation(
+        use_rl=True, 
+        algorithm_name='LA-DRL-GSK',
+        controller_backend=backend,
+    )
+    
+    # Run baseline GSK for comparison
+    df_baseline = evaluator.run_full_evaluation(
+        use_rl=False, 
+        algorithm_name='GSK-Baseline',
+    )
+    
+    # Combine results
+    df_combined = pd.concat([df_ladrl, df_baseline])
+    
+    # Save combined results
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    combined_path = Path(args.output) / f'combined_results_{timestamp}.csv'
+    df_combined.to_csv(combined_path, index=False)
+    print(f"\nCombined results saved to: {combined_path}")
     
     # Generate summary
-    summary = evaluator.generate_summary_table(df)
+    summary = evaluator.generate_summary_table(df_combined)
     print("\n=== Summary Statistics ===")
     print(summary.to_string())
+    
+    # Statistical comparison
+    analyzer = StatisticalAnalyzer()
+    comparison = analyzer.compare_algorithms(df_combined)
+    
+    print("\n=== Statistical Comparison ===")
+    for alg, stats in comparison['summary'].items():
+        print(f"\n{alg}:")
+        print(f"  Mean error: {stats['mean']:.4e}")
+        print(f"  Median error: {stats['median']:.4e}")
+        print(f"  Best: {stats['best']:.4e}")
+    
+    if 'pairwise_wilcoxon' in comparison:
+        for pair, result in comparison['pairwise_wilcoxon'].items():
+            print(f"\nWilcoxon test ({pair}):")
+            print(f"  p-value: {result['pvalue']:.6f}")
+            print(f"  Significant: {result['significant']}")
+            print(f"  Better: {result['better']}")
 
 
 def run_ablation(args):
@@ -339,6 +396,8 @@ def main():
     demo_parser = subparsers.add_parser('demo', help='Quick demonstration')
     demo_parser.add_argument('--detailed', '-d', action='store_true',
                              help='Show detailed logging with features and parameters')
+    demo_parser.add_argument('--cec-path', type=str, default=None,
+                             help='Path to external CEC2017 implementation (e.g., 00-CEC-Root directory)')
     
     # Train command
     train_parser = subparsers.add_parser('train', help='Train SB3 PPO policy')
@@ -357,11 +416,18 @@ def main():
     
     # Evaluate command
     eval_parser = subparsers.add_parser('evaluate', help='Evaluate on benchmarks')
-    eval_parser.add_argument('--dims', type=int, nargs='+', default=[10, 30])
-    eval_parser.add_argument('--runs', type=int, default=51)
-    eval_parser.add_argument('--model', type=str, default=None)
-    eval_parser.add_argument('--output', type=str, default='results')
-    eval_parser.add_argument('--cec-path', type=str, default=None)
+    eval_parser.add_argument('--dims', type=int, nargs='+', default=[10, 30],
+                             help='Dimensions to evaluate (default: 10 30)')
+    eval_parser.add_argument('--runs', type=int, default=51,
+                             help='Number of runs per function (default: 51)')
+    eval_parser.add_argument('--func-ids', type=int, nargs='+', default=None,
+                             help='Specific function IDs to evaluate (default: all 29 CEC2017 functions)')
+    eval_parser.add_argument('--model', type=str, default=None,
+                             help='Path to trained SB3 model')
+    eval_parser.add_argument('--output', type=str, default='results',
+                             help='Output directory for results')
+    eval_parser.add_argument('--cec-path', type=str, default=None,
+                             help='Path to external CEC2017 implementation')
     
     # Ablation command
     ablation_parser = subparsers.add_parser('ablation', help='Run ablation study')
@@ -388,7 +454,7 @@ def main():
         return
     
     if args.command == 'demo':
-        run_demo(detailed=args.detailed)
+        run_demo(detailed=args.detailed, cec_path=args.cec_path)
     elif args.command == 'train':
         run_train(args)
     elif args.command == 'evaluate':

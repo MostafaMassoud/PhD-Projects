@@ -14,24 +14,32 @@ Date: 2025
 
 from __future__ import annotations
 
+import warnings
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    from matplotlib.ticker import LogLocator, LogFormatter
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
+# Suppress deprecation warnings from matplotlib/seaborn during import
+with warnings.catch_warnings():
+    warnings.filterwarnings('ignore', category=DeprecationWarning)
+    warnings.filterwarnings('ignore', category=FutureWarning)
+    
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend to avoid display issues
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.ticker import LogLocator, LogFormatter
+        MATPLOTLIB_AVAILABLE = True
+    except ImportError:
+        MATPLOTLIB_AVAILABLE = False
 
-try:
-    import seaborn as sns
-    SEABORN_AVAILABLE = True
-except ImportError:
-    SEABORN_AVAILABLE = False
+    try:
+        import seaborn as sns
+        SEABORN_AVAILABLE = True
+    except ImportError:
+        SEABORN_AVAILABLE = False
 
 
 # =============================================================================

@@ -539,7 +539,43 @@ class LADRLGSK:
         """
         start_time = time.time()
         
-        # Reset analyzer
+        # Initialize run
+        state = self.reset_run(objective)
+        
+        # =====================================================================
+        # BASELINE FAST PATH (Task D)
+        # When use_rl=False, no logger, and no ablation, skip FLA computation
+        # =====================================================================
+        if not self.config.use_rl and logger is None and self.config.ablation_mode is None:
+            # Pure baseline GSK: fixed parameters, no FLA overhead
+            K = self.config.K
+            kf = self.config.KF
+            kr = self.config.KR
+            p = self.config.P
+            
+            # Run all generations with fixed parameters
+            while state.nfes + state.pop_size <= state.max_nfes:
+                state = self.step_generation(state, objective, K, kf, kr, p)
+                
+                if verbose and state.g % 100 == 0:
+                    print(f"  Gen {state.g}: nfes={state.nfes} best={state.best_f:.6e}")
+            
+            return LADRLGSKResult(
+                best_x=state.best_x,
+                best_f=state.best_f,
+                nfes_used=state.nfes,
+                max_nfes=state.max_nfes,
+                history=np.array(state.history),
+                stop_reason="budget_exhausted" if state.nfes >= state.max_nfes else "completed",
+                runtime=time.time() - start_time,
+                actions_taken=[],  # No RL actions in baseline
+            )
+        
+        # =====================================================================
+        # RL-CONTROLLED PATH (with optional logging)
+        # =====================================================================
+        
+        # Reset controller's analyzer (NOT the log analyzer)
         self.analyzer.reset()
         
         # Initialize controller
@@ -550,8 +586,15 @@ class LADRLGSK:
             self.config.resolved_max_nfes(),
         )
         
-        # Initialize run
-        state = self.reset_run(objective)
+        # Create separate analyzer for logging if needed (Task E)
+        # This prevents log_analyzer.compute_state() from corrupting controller state
+        log_analyzer = None
+        if logger is not None and logger.show_features:
+            log_analyzer = ZeroCostLandscapeAnalyzer(
+                dim=self.config.dim,
+                pop_size=self.config.pop_size,
+                max_nfes=self.config.resolved_max_nfes(),
+            )
         
         # Log header
         if logger is not None:
@@ -582,7 +625,7 @@ class LADRLGSK:
         
         # Main optimization loop
         while state.nfes + state.pop_size <= state.max_nfes:
-            # Get observation for controller
+            # Get observation for controller (only from self.analyzer, not log_analyzer)
             obs = self.analyzer.compute_state(state.pop, state.fitness, state.nfes)
             
             # Apply ablation if configured
@@ -618,9 +661,13 @@ class LADRLGSK:
                 
                 state = self.step_generation(state, objective, K, kf, kr, p)
                 
-                # Log generation
+                # Log generation (using separate log_analyzer to not corrupt controller state)
                 if logger is not None:
-                    obs_log = self.analyzer.compute_state(state.pop, state.fitness, state.nfes)
+                    obs_log = None
+                    if log_analyzer is not None:
+                        # Use separate analyzer for logging features
+                        obs_log = log_analyzer.compute_state(state.pop, state.fitness, state.nfes)
+                    
                     logger.log_generation(
                         generation=state.g,
                         nfes=state.nfes,
@@ -630,9 +677,10 @@ class LADRLGSK:
                         p_junior=int(np.ceil(self.config.dim * (1 - state.g / state.G_max) ** K)) / self.config.dim,
                         KF=kf,
                         KR=kr,
-                        strategy='standard',
+                        strategy='(Q1)',  # Deprecated in Q1, kept for backward compatibility
                         features=obs_log if logger.show_features else None,
                         K=K,
+                        p_senior=p,  # Senior stratification fraction from RL action
                     )
                 
                 if verbose and state.g % 100 == 0:
@@ -662,44 +710,85 @@ class LADRLGSK:
         """
         Compute junior phase indices with proper edge handling.
         
-        Original GSK edge policy:
-        - BEST (rank 0): neighbors are rank 1, rank 2
-        - WORST (rank N-1): neighbors are rank N-3, rank N-2
-        - Otherwise: neighbors are rank-1, rank+1
+        Matches original GSK MATLAB implementation:
+        - BEST (rank 0): R1=2nd best (rank 1), R2=3rd best (rank 2)
+        - WORST (rank N-1): R1=3rd worst (rank N-3), R2=2nd worst (rank N-2)
+        - MIDDLE: R1=better neighbor (rank-1), R2=worse neighbor (rank+1)
+        - R3 must be ≠ self, R1, R2
+        
+        Returns
+        -------
+        Rg1 : ndarray
+            Better neighbor indices
+        Rg2 : ndarray
+            Worse neighbor indices  
+        Rg3 : ndarray
+            Random indices (conflict-free with self, Rg1, and Rg2)
         """
-        # Get rank of each individual
-        rank = np.empty(NP, dtype=np.int64)
-        rank[ind_best] = np.arange(NP)
+        ind_best = np.asarray(ind_best, dtype=np.int64)
+        idx = np.arange(NP, dtype=np.int64)
         
-        # Compute neighbor positions in rank space
-        pos_prev = np.clip(rank - 1, 0, NP - 1)
-        pos_next = np.clip(rank + 1, 0, NP - 1)
+        # Build rank lookup: rank_of[i] = rank of individual i
+        rank_of = np.empty(NP, dtype=np.int64)
+        rank_of[ind_best] = idx
         
-        # Fix edge cases
-        # Best (rank=0): use ranks 1 and 2
-        best_mask = (rank == 0)
-        pos_prev[best_mask] = 1
-        pos_next[best_mask] = 2
+        # Allocate output arrays
+        R1 = np.empty(NP, dtype=np.int64)
+        R2 = np.empty(NP, dtype=np.int64)
         
-        # Worst (rank=N-1): use ranks N-3 and N-2
-        worst_mask = (rank == NP - 1)
-        pos_prev[worst_mask] = NP - 3
-        pos_next[worst_mask] = NP - 2
+        # Handle edge cases
+        best_mask = (rank_of == 0)          # Best individual
+        worst_mask = (rank_of == NP - 1)    # Worst individual
+        middle_mask = ~(best_mask | worst_mask)
         
-        # Handle very small populations
-        if NP <= 3:
-            pos_prev = np.clip(pos_prev, 0, NP - 1)
-            pos_next = np.clip(pos_next, 0, NP - 1)
+        # Best individual: use 2nd and 3rd best as neighbors
+        if NP >= 3:
+            R1[best_mask] = ind_best[1]  # 2nd best
+            R2[best_mask] = ind_best[2]  # 3rd best
+        else:
+            # Very small population fallback
+            R1[best_mask] = ind_best[min(1, NP-1)]
+            R2[best_mask] = ind_best[min(2, NP-1)]
         
-        # Map back to individual indices
-        Rg1 = ind_best[pos_prev]  # Better neighbor
-        Rg2 = ind_best[pos_next]  # Worse neighbor
+        # Worst individual: use 3rd-worst and 2nd-worst as neighbors
+        if NP >= 3:
+            R1[worst_mask] = ind_best[NP - 3]  # 3rd worst
+            R2[worst_mask] = ind_best[NP - 2]  # 2nd worst
+        else:
+            R1[worst_mask] = ind_best[max(0, NP-3)]
+            R2[worst_mask] = ind_best[max(0, NP-2)]
         
-        # Random Rg3 (excluding self)
-        Rg3 = self.rng.randint(0, NP - 1, NP)
-        Rg3 = np.where(Rg3 >= np.arange(NP), Rg3 + 1, Rg3)
+        # Middle individuals: immediate rank neighbors
+        if np.any(middle_mask):
+            ranks = rank_of[middle_mask]
+            R1[middle_mask] = ind_best[ranks - 1]  # Better neighbor
+            R2[middle_mask] = ind_best[ranks + 1]  # Worse neighbor
         
-        return Rg1, Rg2, Rg3
+        # Generate conflict-free R3
+        # R3 must be ≠ self (idx), R1, and R2
+        R3 = self.rng.randint(0, NP, NP)
+        
+        # For very small populations (NP < 4), we may not be able to satisfy all constraints
+        if NP >= 4:
+            # Resolve conflicts iteratively with hard cap
+            max_iterations = 20
+            for _ in range(max_iterations):
+                conflict_mask = (R3 == idx) | (R3 == R1) | (R3 == R2)
+                if not np.any(conflict_mask):
+                    break
+                n_conflicts = int(conflict_mask.sum())
+                R3[conflict_mask] = self.rng.randint(0, NP, n_conflicts)
+        else:
+            # Small population: just ensure R3 != self
+            max_iterations = 20
+            for _ in range(max_iterations):
+                conflict_mask = (R3 == idx)
+                if not np.any(conflict_mask):
+                    break
+                n_conflicts = int(conflict_mask.sum())
+                R3[conflict_mask] = self.rng.randint(0, NP, n_conflicts)
+        
+        return R1, R2, R3
     
     def _senior_indices(
         self, 

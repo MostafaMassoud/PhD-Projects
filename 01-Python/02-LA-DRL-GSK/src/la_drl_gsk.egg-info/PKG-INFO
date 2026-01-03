@@ -1,3 +1,25 @@
+Metadata-Version: 2.1
+Name: la-drl-gsk
+Version: 2.0.0
+Summary: Landscape-Aware Deep Reinforcement Learning GSK Algorithm
+Home-page: https://github.com/your-repo/LA-DRL-GSK
+Author: LA-DRL-GSK Research Team
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Provides-Extra: all
+Provides-Extra: dev
+Provides-Extra: rl
+Provides-Extra: torch
+Provides-Extra: viz
+
 # LA-DRL-GSK: Landscape-Aware Deep Reinforcement Learning for GSK
 
 Q1 Implementation of Landscape-Aware Deep Reinforcement Learning controller for the Gaining-Sharing Knowledge (GSK) optimization algorithm.
@@ -33,14 +55,7 @@ pip install -r requirements-rl.txt
 ### Demo
 
 ```bash
-# Quick demo with bundled CEC2017
 python run.py demo
-
-# Demo with detailed logging (shows K, kf, kr, p_junior, p_senior)
-python run.py demo --detailed
-
-# Demo with external CEC2017 benchmark suite
-python run.py demo --cec-path /path/to/00-CEC-Root
 ```
 
 ### Baseline GSK (no RL)
@@ -101,17 +116,7 @@ python -m la_drl_gsk.train_sb3 --dim 30 --timesteps 200000 --save-dir models
 ## Evaluation
 
 ```bash
-# Evaluate with heuristic controller (all 29 functions)
-python run.py evaluate --dims 10 30 --runs 51
-
-# Quick smoke test with specific functions
-python run.py evaluate --dims 10 --runs 5 --func-ids 1 5 10
-
-# Evaluate with trained SB3 model
 python run.py evaluate --dims 10 30 --runs 51 --model models/ppo_gsk_D30.zip
-
-# Evaluate with external CEC2017
-python run.py evaluate --dims 10 30 --runs 51 --cec-path /path/to/00-CEC-Root
 ```
 
 ## Q1 Design
@@ -184,28 +189,6 @@ Or specify the path:
 ```bash
 python run.py demo --cec-path /path/to/00-CEC-Root
 ```
-
-## CLI Reference
-
-```bash
-# Get help for all commands
-python run.py -h
-
-# Get help for specific command
-python run.py demo -h
-python run.py evaluate -h
-python run.py train -h
-```
-
-### Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `demo` | Quick demonstration (5 runs baseline vs LA-DRL-GSK) |
-| `train` | Train SB3 PPO policy (requires RL deps) |
-| `evaluate` | Full CEC2017 benchmark evaluation |
-| `ablation` | Run ablation studies on feature groups |
-| `compare` | Compare multiple algorithms |
 
 ## Testing
 

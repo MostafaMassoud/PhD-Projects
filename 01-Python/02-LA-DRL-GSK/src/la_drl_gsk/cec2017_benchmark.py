@@ -25,8 +25,9 @@ from __future__ import annotations
 import numpy as np
 import sys
 import importlib
+import importlib.util
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 
@@ -71,115 +72,206 @@ class BenchmarkFunction:
 # CEC2017 Function Loader
 # =============================================================================
 
+# Module cache: stores (module, source_type) where source_type is 'bundled', 'external', or 'synthetic'
 _cec2017_module = None
-_cec2017_functions = None
+_cec2017_loaded = False
+_cec2017_source = None  # Track where module came from
+
+
+def _load_module_from_path(module_path: Path, module_name: str = 'cec2017_functions'):
+    """Load a Python module from file path."""
+    spec = importlib.util.spec_from_file_location(module_name, str(module_path))
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+def _try_load_external_cec(cec_path: str) -> Optional[Any]:
+    """
+    Try to load CEC2017 from an external path.
+    
+    Supports layouts:
+    A) <cec_root>/cec2017/functions.py  (package cec2017)
+    B) <cec_root>/cec2017/cec2017/functions.py (nested package)
+    C) <cec_root>/functions.py (flat module)
+    
+    Returns the module if successful, None otherwise.
+    """
+    cec_p = Path(cec_path).resolve()
+    
+    # List of (functions_file, parent_to_add_to_sys_path) tuples to try
+    candidates = []
+    
+    if cec_p.is_dir():
+        # Layout A: <cec_root>/cec2017/functions.py
+        candidates.append((cec_p / 'cec2017' / 'functions.py', cec_p))
+        # Layout B: <cec_root>/cec2017/cec2017/functions.py  
+        candidates.append((cec_p / 'cec2017' / 'cec2017' / 'functions.py', cec_p / 'cec2017'))
+        # Layout C: <cec_root>/functions.py
+        candidates.append((cec_p / 'functions.py', cec_p))
+    else:
+        # Direct file path
+        candidates.append((cec_p, cec_p.parent))
+    
+    for func_file, sys_path_entry in candidates:
+        if not func_file.exists():
+            continue
+        
+        try:
+            # Add parent to sys.path temporarily for relative imports to work
+            sys_path_entry_str = str(sys_path_entry)
+            added_to_path = False
+            if sys_path_entry_str not in sys.path:
+                sys.path.insert(0, sys_path_entry_str)
+                added_to_path = True
+            
+            try:
+                # Try importing as a package first
+                if func_file.parent.name == 'cec2017':
+                    try:
+                        # Clear any cached version
+                        if 'cec2017' in sys.modules:
+                            del sys.modules['cec2017']
+                        if 'cec2017.functions' in sys.modules:
+                            del sys.modules['cec2017.functions']
+                        
+                        # Try package import
+                        mod = importlib.import_module('cec2017.functions')
+                        if _validate_cec_module(mod):
+                            return mod
+                    except Exception:
+                        pass
+                
+                # Fallback to direct file loading
+                mod = _load_module_from_path(func_file, f'cec2017_ext_{hash(str(func_file))}')
+                if mod is not None and _validate_cec_module(mod):
+                    return mod
+                    
+            finally:
+                if added_to_path and sys_path_entry_str in sys.path:
+                    sys.path.remove(sys_path_entry_str)
+                    
+        except Exception:
+            continue
+    
+    return None
+
+
+def _try_load_bundled_cec() -> Optional[Any]:
+    """
+    Try to load the bundled CEC2017 implementation.
+    
+    Location: src/cec2017/functions.py (relative to this file)
+    """
+    this_dir = Path(__file__).parent.resolve()
+    bundled_path = this_dir.parent / 'cec2017' / 'functions.py'
+    
+    if not bundled_path.exists():
+        return None
+    
+    try:
+        mod = _load_module_from_path(bundled_path, 'cec2017_bundled')
+        if mod is not None and _validate_cec_module(mod):
+            return mod
+    except Exception:
+        pass
+    
+    return None
+
+
+def _validate_cec_module(mod: Any) -> bool:
+    """Check if a module has valid CEC2017 interface."""
+    # Must have either get_cec2017_function or all_functions
+    has_getter = hasattr(mod, 'get_cec2017_function')
+    has_all = hasattr(mod, 'all_functions')
+    has_test = hasattr(mod, 'cec2017_test_func') or hasattr(mod, 'cec2017_func')
+    
+    return has_getter or has_all or has_test
 
 
 def _ensure_cec2017_loaded(cec_path: Optional[str] = None) -> None:
     """
     Ensure CEC2017 functions are loaded.
     
-    Searches for CEC2017 implementation in standard locations:
-    1. Provided cec_path
-    2. ../cec2017/ relative to this file
-    3. Environment variable CEC2017_PATH
-    """
-    global _cec2017_module, _cec2017_functions
+    Load priority:
+    1. External path (if cec_path provided)
+    2. Bundled implementation (src/cec2017/functions.py)
+    3. Synthetic fallback (only if both fail)
     
-    if _cec2017_functions is not None:
+    Note: Warning is only printed if BOTH external and bundled fail.
+    """
+    global _cec2017_module, _cec2017_loaded, _cec2017_source
+    
+    if _cec2017_loaded:
         return
     
-    # Candidate paths
-    search_paths = []
-    
+    # 1. Try external path if provided
     if cec_path:
-        search_paths.append(Path(cec_path))
+        mod = _try_load_external_cec(cec_path)
+        if mod is not None:
+            _cec2017_module = mod
+            _cec2017_loaded = True
+            _cec2017_source = 'external'
+            return
     
-    # Relative to this file
-    this_dir = Path(__file__).parent
-    search_paths.extend([
-        this_dir / '..' / '..' / 'cec2017',
-        this_dir / '..' / '..' / '..' / 'cec2017',
-        this_dir / '..' / '..' / '..' / '00-CEC2017',
-        this_dir / '..' / '..' / '..' / '00-CEC-Root' / 'cec2017',
-    ])
+    # 2. Try bundled implementation
+    mod = _try_load_bundled_cec()
+    if mod is not None:
+        _cec2017_module = mod
+        _cec2017_loaded = True
+        _cec2017_source = 'bundled'
+        return
     
-    # Try each path
-    for path in search_paths:
-        path = path.resolve()
-        
-        # Check for different layouts
-        candidates = [
-            (path / 'functions.py', path),
-            (path / 'cec2017' / 'functions.py', path),
-        ]
-        
-        for func_file, sys_path in candidates:
-            if func_file.exists():
-                if str(sys_path) not in sys.path:
-                    sys.path.insert(0, str(sys_path))
-                try:
-                    if 'cec2017' in str(func_file):
-                        mod = importlib.import_module('cec2017.functions')
-                    else:
-                        mod = importlib.import_module('functions')
-                    
-                    _cec2017_module = mod
-                    _cec2017_functions = getattr(mod, 'all_functions', None)
-                    
-                    if _cec2017_functions is not None:
-                        return
-                except ImportError:
-                    continue
-    
-    # If still not loaded, create synthetic functions for testing
+    # 3. Fallback to synthetic - only warn here when both fail
     print("WARNING: CEC2017 functions not found. Using synthetic test functions.")
-    _cec2017_functions = _create_synthetic_functions()
+    _cec2017_module = None
+    _cec2017_loaded = True
+    _cec2017_source = 'synthetic'
 
 
-def _create_synthetic_functions() -> List[Callable]:
-    """Create synthetic test functions when CEC2017 not available."""
-    functions = []
+def _create_synthetic_function(func_id: int, dim: int) -> Tuple[Callable, float]:
+    """Create a synthetic test function when CEC2017 not available."""
+    f_opt = func_id * 100.0
     
-    for i in range(30):
-        f_opt = (i + 1) * 100
-        
-        if i < 3:  # Unimodal (sphere-like)
-            functions.append(_make_sphere(f_opt))
-        elif i < 10:  # Multimodal (rastrigin-like)
-            functions.append(_make_rastrigin(f_opt))
-        else:  # Hybrid/Composition (simplified)
-            functions.append(_make_hybrid(f_opt))
+    # Create random shift for this function
+    rng = np.random.RandomState(func_id * 1000 + dim)
+    shift = rng.uniform(-50, 50, dim)
     
-    return functions
-
-
-def _make_sphere(offset: float):
-    """Create sphere function with offset."""
-    def f(x):
-        x = np.atleast_2d(x)
-        return np.sum(x ** 2, axis=1) + offset
-    return f
-
-
-def _make_rastrigin(offset: float):
-    """Create Rastrigin function with offset."""
-    def f(x):
-        x = np.atleast_2d(x)
-        d = x.shape[1]
-        return 10 * d + np.sum(x ** 2 - 10 * np.cos(2 * np.pi * x), axis=1) + offset
-    return f
-
-
-def _make_hybrid(offset: float):
-    """Create hybrid function with offset."""
-    def f(x):
-        x = np.atleast_2d(x)
-        d = x.shape[1]
-        return (np.sum(x ** 2, axis=1) + 
-                np.sum(np.abs(x), axis=1) + 
-                np.prod(np.abs(x) + 1e-10, axis=1) ** (1/d)) + offset
-    return f
+    if func_id <= 3:  # Unimodal (sphere-like)
+        def objective(x):
+            x = np.atleast_2d(x).astype(np.float64)
+            z = x - shift
+            return np.sum(z ** 2, axis=1) + f_opt
+            
+    elif func_id <= 10:  # Multimodal (rastrigin-like)
+        def objective(x):
+            x = np.atleast_2d(x).astype(np.float64)
+            z = x - shift
+            return 10 * dim + np.sum(z ** 2 - 10 * np.cos(2 * np.pi * z), axis=1) + f_opt
+            
+    elif func_id <= 20:  # Hybrid (griewank-like)
+        def objective(x):
+            x = np.atleast_2d(x).astype(np.float64)
+            z = x - shift
+            idx = np.arange(1, dim + 1)
+            sum_sq = np.sum(z ** 2, axis=1) / 4000
+            prod_cos = np.prod(np.cos(z / np.sqrt(idx)), axis=1)
+            return sum_sq - prod_cos + 1 + f_opt
+            
+    else:  # Composition (ackley-like)
+        def objective(x):
+            x = np.atleast_2d(x).astype(np.float64)
+            z = x - shift
+            t1 = -20 * np.exp(-0.2 * np.sqrt(np.mean(z ** 2, axis=1)))
+            t2 = -np.exp(np.mean(np.cos(2 * np.pi * z), axis=1))
+            return t1 + t2 + 20 + np.e + f_opt
+    
+    return objective, f_opt
 
 
 def get_cec2017_function(
@@ -202,10 +294,16 @@ def get_cec2017_function(
     Returns
     -------
     objective : callable
-        Vectorized objective function f(X) -> y
+        Vectorized objective function f(X) -> y where X is (N, D)
     f_opt : float
         Known optimal value (100 * func_id)
     """
+    # Reset and reload if cec_path is provided and different from current source
+    global _cec2017_loaded
+    if cec_path is not None:
+        # Force reload to try the new path
+        reset_cec2017_cache()
+    
     _ensure_cec2017_loaded(cec_path)
     
     if not (1 <= func_id <= 30):
@@ -214,12 +312,74 @@ def get_cec2017_function(
     if func_id == 2:
         raise ValueError("F2 is excluded from CEC2017 benchmarks due to instability")
     
-    # Get function (0-indexed)
-    f = _cec2017_functions[func_id - 1]
     f_opt = 100.0 * func_id
     
+    # No module available - use synthetic
+    if _cec2017_module is None:
+        return _create_synthetic_function(func_id, dim)
+    
+    # Try module's get_cec2017_function first (bundled implementation has this)
+    if hasattr(_cec2017_module, 'get_cec2017_function'):
+        try:
+            func_obj, mod_f_opt = _cec2017_module.get_cec2017_function(func_id, dim)
+            return _wrap_objective(func_obj, dim), mod_f_opt
+        except Exception:
+            pass
+    
+    # Try all_functions attribute
+    if hasattr(_cec2017_module, 'all_functions'):
+        all_funcs = _cec2017_module.all_functions
+        
+        # Check if it's callable (lambda returning list) or a list
+        if callable(all_funcs):
+            try:
+                # Bundled implementation: lambda dim -> list of funcs (excludes F2)
+                funcs = all_funcs(dim)
+                if len(funcs) == 29:
+                    # F2 is excluded, need to map func_id to index
+                    # func_id 1 -> index 0
+                    # func_id 3 -> index 1, func_id 4 -> index 2, etc.
+                    if func_id == 1:
+                        idx = 0
+                    elif func_id > 2:
+                        idx = func_id - 2  # 3->1, 4->2, ..., 30->28
+                    else:
+                        raise ValueError(f"Invalid func_id {func_id}")
+                    f = funcs[idx]
+                else:
+                    # Full list of 30
+                    f = funcs[func_id - 1]
+                return _wrap_objective(f, dim), f_opt
+            except Exception:
+                pass
+        else:
+            # It's a list (external 00-CEC-Root format)
+            try:
+                if len(all_funcs) == 30:
+                    f = all_funcs[func_id - 1]
+                    return _wrap_objective(f, dim), f_opt
+            except Exception:
+                pass
+    
+    # Try cec2017_test_func or cec2017_func (compatibility wrappers)
+    for func_name in ['cec2017_test_func', 'cec2017_func']:
+        if hasattr(_cec2017_module, func_name):
+            test_func = getattr(_cec2017_module, func_name)
+            
+            def objective(X, _func_id=func_id, _test_func=test_func):
+                X = np.atleast_2d(X).astype(np.float64)
+                return np.asarray(_test_func(X, _func_id), dtype=np.float64).ravel()
+            
+            return objective, f_opt
+    
+    # Fallback to synthetic
+    return _create_synthetic_function(func_id, dim)
+
+
+def _wrap_objective(f: Any, dim: int) -> Callable[[np.ndarray], np.ndarray]:
+    """Wrap a benchmark function to ensure vectorized (N,D) -> (N,) interface."""
+    
     def objective(X: np.ndarray) -> np.ndarray:
-        """Vectorized objective wrapper."""
         X = np.atleast_2d(X).astype(np.float64)
         
         if X.ndim != 2:
@@ -227,10 +387,10 @@ def get_cec2017_function(
         
         n = X.shape[0]
         
-        # Try batch evaluation
+        # Try batch evaluation first
         try:
             y = f(X)
-            y = np.asarray(y, dtype=np.float64).reshape(-1)
+            y = np.asarray(y, dtype=np.float64).ravel()
             if y.shape[0] == n:
                 return y
         except Exception:
@@ -239,11 +399,16 @@ def get_cec2017_function(
         # Fallback: row by row
         y = np.empty(n, dtype=np.float64)
         for i in range(n):
-            yi = f(X[i:i+1, :])
-            y[i] = float(np.asarray(yi).flat[0])
+            try:
+                yi = f(X[i:i+1, :])
+                y[i] = float(np.asarray(yi).flat[0])
+            except Exception:
+                # Single row evaluation
+                yi = f(X[i])
+                y[i] = float(np.asarray(yi).flat[0])
         return y
     
-    return objective, f_opt
+    return objective
 
 
 def get_benchmark_info(func_id: int, dim: int) -> BenchmarkFunction:
@@ -345,76 +510,17 @@ class BenchmarkSuite:
 
 
 # =============================================================================
-# Evaluation Utilities
+# Reset function for testing
 # =============================================================================
 
-def evaluate_on_function(
-    optimizer,
-    func_id: int,
-    dim: int,
-    n_runs: int = 51,
-    seed_base: int = 0,
-    cec_path: Optional[str] = None,
-    verbose: bool = False,
-) -> dict:
-    """
-    Evaluate optimizer on a single CEC2017 function.
-    
-    Parameters
-    ----------
-    optimizer : LADRLGSK or callable
-        Optimizer instance with optimize(objective) method
-    func_id : int
-        CEC2017 function ID
-    dim : int
-        Problem dimension
-    n_runs : int
-        Number of independent runs
-    seed_base : int
-        Base seed for runs (run i uses seed_base + i)
-    cec_path : str, optional
-        Path to CEC2017 implementation
-    verbose : bool
-        Print progress
-        
-    Returns
-    -------
-    dict with keys: errors, best, worst, mean, median, std
-    """
-    objective, f_opt = get_cec2017_function(func_id, dim, cec_path)
-    
-    errors = []
-    
-    for run in range(n_runs):
-        seed = seed_base + run
-        
-        # Create new optimizer instance with seed
-        from .la_drl_gsk import LADRLGSKConfig, LADRLGSK
-        config = LADRLGSKConfig(
-            dim=dim,
-            seed=seed,
-            use_rl=optimizer.config.use_rl if hasattr(optimizer, 'config') else True,
-            ablation_mode=optimizer.config.ablation_mode if hasattr(optimizer, 'config') else None,
-        )
-        opt = LADRLGSK(config, policy=optimizer.policy if hasattr(optimizer, 'policy') else None)
-        
-        result = opt.optimize(objective)
-        error = abs(result.best_f - f_opt)
-        errors.append(error)
-        
-        if verbose:
-            print(f"  Run {run+1:02d}/{n_runs}: error={error:.6e}")
-    
-    errors = np.array(errors)
-    
-    return {
-        'func_id': func_id,
-        'dim': dim,
-        'n_runs': n_runs,
-        'errors': errors,
-        'best': float(np.min(errors)),
-        'worst': float(np.max(errors)),
-        'mean': float(np.mean(errors)),
-        'median': float(np.median(errors)),
-        'std': float(np.std(errors)),
-    }
+def reset_cec2017_cache() -> None:
+    """Reset the CEC2017 module cache (useful for testing)."""
+    global _cec2017_module, _cec2017_loaded, _cec2017_source
+    _cec2017_module = None
+    _cec2017_loaded = False
+    _cec2017_source = None
+
+
+def get_cec2017_source() -> Optional[str]:
+    """Get the source of the currently loaded CEC2017 module."""
+    return _cec2017_source

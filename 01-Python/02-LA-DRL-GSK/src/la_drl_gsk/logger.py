@@ -183,7 +183,8 @@ class GenerationStats:
     KF: float
     KR: float
     K: float
-    strategy: str
+    strategy: str  # Kept for backward compatibility but marked as deprecated
+    p_senior: float = 0.1  # Senior stratification fraction (Q1 action)
     features: Optional[Dict[str, float]] = None
     runtime: float = 0.0
     
@@ -460,7 +461,7 @@ class OptimizationLogger:
         """Print header for generation logs."""
         C = Colors
         
-        # Main header
+        # Main header - Q1 format: K, kf, kr, p_junior, p_senior
         cols = [
             ('Gen', 5),
             ('NFEs', 9),
@@ -471,10 +472,11 @@ class OptimizationLogger:
         
         if self.show_params:
             cols.extend([
+                ('K', 5),
+                ('kf', 5),
+                ('kr', 5),
                 ('p_jun', 6),
-                ('KF', 5),
-                ('KR', 5),
-                ('Strategy', 10),
+                ('p_sen', 6),
             ])
         
         header = ' │ '.join(f"{name:>{width}}" for name, width in cols)
@@ -497,6 +499,7 @@ class OptimizationLogger:
         features: Optional[np.ndarray] = None,
         action: Optional[Dict] = None,
         K: float = 10.0,
+        p_senior: float = 0.1,  # Senior stratification fraction (Q1 action)
     ):
         """Log a generation with full statistics."""
         C = Colors
@@ -541,6 +544,7 @@ class OptimizationLogger:
             KR=KR,
             K=K,
             strategy=strategy,
+            p_senior=p_senior,
             features=feature_dict,
             stagnation_count=self._stagnation_count,
             pop_diversity=features[0] if features is not None else 0.0,
@@ -588,15 +592,7 @@ class OptimizationLogger:
         # Mean ± Std
         mean_std = f"{format_scientific(stats.mean_f)} ± {format_scientific(stats.std_f)}"
         
-        # Strategy color
-        strat_colors = {
-            'standard': C.WHITE,
-            'aggressive': C.RED,
-            'conservative': C.BLUE,
-        }
-        strat_color = strat_colors.get(stats.strategy, '')
-        
-        # Build line
+        # Build line - Q1 format: K, kf, kr, p_junior, p_senior
         line_parts = [
             f"{stats.generation:>5}",
             f"{nfes:>9,}",
@@ -607,10 +603,11 @@ class OptimizationLogger:
         
         if self.show_params:
             line_parts.extend([
-                f"{stats.p_junior:>6.3f}",
+                f"{stats.K:>5.1f}",
                 f"{stats.KF:>5.2f}",
                 f"{stats.KR:>5.2f}",
-                f"{strat_color}{stats.strategy:>10}{C.RESET}",
+                f"{stats.p_junior:>6.3f}",
+                f"{stats.p_senior:>6.3f}",
             ])
         
         print(' │ '.join(line_parts))
@@ -711,32 +708,19 @@ class OptimizationLogger:
             print(section_header("PARAMETER STATISTICS", W))
             print()
             
-            p_juniors = [g.p_junior for g in self.log.generations]
+            # Q1 parameters: K, kf, kr, p_junior, p_senior
+            ks = [g.K for g in self.log.generations]
             kfs = [g.KF for g in self.log.generations]
             krs = [g.KR for g in self.log.generations]
-            strategies = [g.strategy for g in self.log.generations]
+            p_juniors = [g.p_junior for g in self.log.generations]
+            p_seniors = [g.p_senior for g in self.log.generations]
             
             # Parameter table
             print(f"  {'Parameter':<12} │ {'Min':>8} │ {'Max':>8} │ {'Mean':>8} │ {'Std':>8}")
             print(f"  {'─'*12}─┼─{'─'*8}─┼─{'─'*8}─┼─{'─'*8}─┼─{'─'*8}")
             
-            for name, values in [('p_junior', p_juniors), ('KF', kfs), ('KR', krs)]:
+            for name, values in [('K', ks), ('kf', kfs), ('kr', krs), ('p_junior', p_juniors), ('p_senior', p_seniors)]:
                 print(f"  {name:<12} │ {min(values):>8.4f} │ {max(values):>8.4f} │ {np.mean(values):>8.4f} │ {np.std(values):>8.4f}")
-            
-            print()
-            
-            # Strategy distribution
-            print(f"  {C.BOLD}Strategy Distribution:{C.RESET}")
-            strat_counts = {}
-            for s in strategies:
-                strat_counts[s] = strat_counts.get(s, 0) + 1
-            
-            for strat, count in sorted(strat_counts.items(), key=lambda x: -x[1]):
-                pct = count / len(strategies) * 100
-                bar_width = int(30 * pct / 100)
-                bar = '█' * bar_width + '░' * (30 - bar_width)
-                strat_color = {'standard': C.WHITE, 'aggressive': C.RED, 'conservative': C.BLUE}.get(strat, '')
-                print(f"    {strat_color}{strat:<12}{C.RESET} [{bar}] {pct:>5.1f}% ({count})")
             
             print()
         

@@ -21,12 +21,111 @@ Date: 2025
 
 from __future__ import annotations
 
+import warnings
 import numpy as np
 from scipy.spatial.distance import pdist, squareform
-from scipy.stats import spearmanr, kendalltau
+from scipy.stats import spearmanr, kendalltau, ConstantInputWarning
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+
+
+# =============================================================================
+# Safe Correlation Helpers (suppress ConstantInputWarning, handle NaN)
+# =============================================================================
+
+def _safe_std(a: np.ndarray) -> float:
+    """Compute std safely, returning 0.0 for empty/single-element arrays."""
+    if len(a) < 2:
+        return 0.0
+    return float(np.std(a))
+
+
+def safe_pearson_corr(a: np.ndarray, b: np.ndarray) -> float:
+    """
+    Compute Pearson correlation safely.
+    
+    Returns 0.0 when either array has zero standard deviation (constant input),
+    or when the result is NaN/inf.
+    """
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    
+    std_a = _safe_std(a)
+    std_b = _safe_std(b)
+    
+    if std_a < 1e-15 or std_b < 1e-15:
+        return 0.0
+    
+    try:
+        corr = np.corrcoef(a, b)[0, 1]
+        if np.isnan(corr) or np.isinf(corr):
+            return 0.0
+        return float(np.clip(corr, -1.0, 1.0))
+    except Exception:
+        return 0.0
+
+
+def safe_spearman(a: np.ndarray, b: np.ndarray) -> float:
+    """
+    Compute Spearman correlation safely.
+    
+    Suppresses ConstantInputWarning and returns 0.0 when:
+    - Either array is constant
+    - Result is NaN/inf
+    - Any error occurs
+    """
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    
+    # Check for constant input before calling spearmanr
+    std_a = _safe_std(a)
+    std_b = _safe_std(b)
+    
+    if std_a < 1e-15 or std_b < 1e-15:
+        return 0.0
+    
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=ConstantInputWarning)
+            corr, _ = spearmanr(a, b)
+            
+        if np.isnan(corr) or np.isinf(corr):
+            return 0.0
+        return float(np.clip(corr, -1.0, 1.0))
+    except Exception:
+        return 0.0
+
+
+def safe_kendall(a: np.ndarray, b: np.ndarray) -> float:
+    """
+    Compute Kendall's tau correlation safely.
+    
+    Suppresses ConstantInputWarning and returns 0.0 when:
+    - Either array is constant
+    - Result is NaN/inf
+    - Any error occurs
+    """
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    
+    # Check for constant input before calling kendalltau
+    std_a = _safe_std(a)
+    std_b = _safe_std(b)
+    
+    if std_a < 1e-15 or std_b < 1e-15:
+        return 0.0
+    
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=ConstantInputWarning)
+            tau, _ = kendalltau(a, b)
+            
+        if np.isnan(tau) or np.isinf(tau):
+            return 0.0
+        return float(np.clip(tau, -1.0, 1.0))
+    except Exception:
+        return 0.0
 
 
 @dataclass
@@ -209,7 +308,12 @@ class ZeroCostLandscapeAnalyzer:
         # Update history for next generation
         self._update_history(population, fitness)
         
-        return np.array(features, dtype=np.float32)
+        # Final sanitization: ensure all values are finite and in [0, 1]
+        state = np.array(features, dtype=np.float32)
+        state = np.nan_to_num(state, nan=0.0, posinf=1.0, neginf=0.0)
+        state = np.clip(state, 0.0, 1.0)
+        
+        return state
     
     def compute_features_structured(
         self, 
@@ -316,8 +420,7 @@ class ZeroCostLandscapeAnalyzer:
         
         mask = np.arange(n) != best_idx
         if np.sum(mask) > 2:
-            fdc, _ = spearmanr(fit[mask], distances_to_best[mask])
-            fdc = 0.0 if np.isnan(fdc) else float(fdc)
+            fdc = safe_spearman(fit[mask], distances_to_best[mask])
         else:
             fdc = 0.0
         fdc = (fdc + 1) / 2  # Normalize from [-1,1] to [0,1]
@@ -325,14 +428,12 @@ class ZeroCostLandscapeAnalyzer:
         # 2. Fitness-Distance Correlation to centroid
         centroid = np.mean(pop, axis=0)
         distances_to_centroid = np.linalg.norm(pop - centroid, axis=1)
-        fdc_centroid, _ = spearmanr(fit, distances_to_centroid)
-        fdc_centroid = 0.0 if np.isnan(fdc_centroid) else float(fdc_centroid)
+        fdc_centroid = safe_spearman(fit, distances_to_centroid)
         fdc_centroid = (fdc_centroid + 1) / 2
         
         # 3. Kendall's tau correlation
         if np.sum(mask) > 2:
-            tau, _ = kendalltau(fit[mask], distances_to_best[mask])
-            tau = 0.0 if np.isnan(tau) else float(tau)
+            tau = safe_kendall(fit[mask], distances_to_best[mask])
         else:
             tau = 0.0
         tau = (tau + 1) / 2
@@ -341,9 +442,8 @@ class ZeroCostLandscapeAnalyzer:
         dim_correlations = []
         sample_dims = min(self.dim, 20)  # Cap for efficiency
         for d in range(sample_dims):
-            corr, _ = spearmanr(pop[:, d], fit)
-            if not np.isnan(corr):
-                dim_correlations.append(abs(corr))
+            corr = safe_spearman(pop[:, d], fit)
+            dim_correlations.append(abs(corr))
         separability = float(np.mean(dim_correlations)) if dim_correlations else 0.0
         
         # 5. Neighbor fitness correlation
@@ -351,7 +451,8 @@ class ZeroCostLandscapeAnalyzer:
         np.fill_diagonal(dist_matrix, np.inf)
         nearest_idx = np.argmin(dist_matrix, axis=1)
         neighbor_fit_diff = np.abs(fit - fit[nearest_idx])
-        neighbor_correlation = float(1.0 / (1.0 + np.mean(neighbor_fit_diff) / (np.std(fit) + 1e-10)))
+        fit_std = _safe_std(fit)
+        neighbor_correlation = float(1.0 / (1.0 + np.mean(neighbor_fit_diff) / (fit_std + 1e-10)))
         neighbor_correlation = np.clip(neighbor_correlation, 0, 1)
         
         return [fdc, fdc_centroid, tau, separability, neighbor_correlation]

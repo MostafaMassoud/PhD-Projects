@@ -46,14 +46,16 @@ class BenchmarkSuite:
     Supports CEC2017 or synthetic fallback functions.
     """
     
-    # Function categories for curriculum learning
-    UNIMODAL = [1, 2, 3]
+    # Function categories for curriculum learning (F2 excluded per CEC2017 standard)
+    UNIMODAL = [1, 3]  # F2 excluded
     SIMPLE_MULTIMODAL = [4, 5, 6, 7]
     COMPLEX_MULTIMODAL = [8, 9, 10]
     HYBRID = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     COMPOSITION = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
     
-    ALL_FUNCTIONS = list(range(1, 31))
+    # Default: all functions excluding F2 (matches CEC2017_FUNCTIONS)
+    ALL_FUNCTIONS = [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 
+                    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
     
     def __init__(
         self,
@@ -71,7 +73,7 @@ class BenchmarkSuite:
         cec_path : str, optional
             Path to CEC2017 data files
         functions : list, optional
-            List of function IDs to use (default: all)
+            List of function IDs to use (default: all excluding F2)
         """
         self.dim = dim
         self.cec_path = cec_path
@@ -82,8 +84,8 @@ class BenchmarkSuite:
         try:
             from .cec2017_benchmark import get_cec2017_function
             self._get_func = get_cec2017_function
-            # Test if it works
-            _, _ = self._get_func(1, dim)
+            # Test if it works - pass cec_path!
+            _, _ = self._get_func(1, dim, cec_path)
             self._cec_available = True
         except Exception as e:
             warnings.warn(f"CEC2017 not available ({e}), using synthetic functions")
@@ -106,7 +108,8 @@ class BenchmarkSuite:
         
         if self._cec_available:
             try:
-                objective, f_opt = self._get_func(func_id, self.dim)
+                # Pass cec_path when loading function
+                objective, f_opt = self._get_func(func_id, self.dim, self.cec_path)
                 return objective, f_opt, func_id
             except Exception:
                 pass

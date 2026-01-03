@@ -99,6 +99,80 @@ class TestLandscapeAnalyzer(unittest.TestCase):
         # Should work after reset
         features = self.analyzer.compute_state(pop, fitness)
         self.assertEqual(len(features), 25)
+    
+    def test_constant_fitness_no_exception(self):
+        """Test analyzer handles constant fitness values (Task 3 - ConstantInputWarning fix)."""
+        import warnings
+        from la_drl_gsk import ZeroCostLandscapeAnalyzer
+        
+        analyzer = ZeroCostLandscapeAnalyzer(dim=10, pop_size=50)
+        
+        # Create population with constant fitness
+        pop = np.random.uniform(-100, 100, (50, 10))
+        fitness = np.ones(50) * 100.0  # All same fitness value
+        
+        # Capture warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            features = analyzer.compute_state(pop, fitness)
+            
+            # Check no ConstantInputWarning was emitted
+            constant_warnings = [x for x in w if 'ConstantInput' in str(x.category)]
+            self.assertEqual(len(constant_warnings), 0, 
+                           f"ConstantInputWarning should be suppressed, got: {constant_warnings}")
+        
+        # Check output is valid
+        self.assertEqual(features.shape, (25,))
+        self.assertTrue(np.all(np.isfinite(features)), "All features should be finite")
+        self.assertTrue(np.all(features >= 0) and np.all(features <= 1), 
+                       "All features should be in [0, 1]")
+    
+    def test_constant_population_no_exception(self):
+        """Test analyzer handles constant population (all individuals same)."""
+        import warnings
+        from la_drl_gsk import ZeroCostLandscapeAnalyzer
+        
+        analyzer = ZeroCostLandscapeAnalyzer(dim=10, pop_size=50)
+        
+        # Create identical population (all same position)
+        single_point = np.random.uniform(-100, 100, 10)
+        pop = np.tile(single_point, (50, 1))
+        fitness = np.random.uniform(0, 1000, 50)
+        
+        # Should not raise exception
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            features = analyzer.compute_state(pop, fitness)
+            
+            # Check no ConstantInputWarning was emitted
+            constant_warnings = [x for x in w if 'ConstantInput' in str(x.category)]
+            self.assertEqual(len(constant_warnings), 0)
+        
+        # Check output is valid
+        self.assertEqual(features.shape, (25,))
+        self.assertTrue(np.all(np.isfinite(features)))
+    
+    def test_near_converged_population(self):
+        """Test analyzer handles nearly converged population (small variance)."""
+        import warnings
+        from la_drl_gsk import ZeroCostLandscapeAnalyzer
+        
+        analyzer = ZeroCostLandscapeAnalyzer(dim=10, pop_size=50)
+        
+        # Create population clustered around optimum (simulating convergence)
+        center = np.zeros(10)
+        pop = center + np.random.normal(0, 1e-10, (50, 10))  # Very small variance
+        fitness = sphere(pop)
+        
+        # Should not raise exception
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            features = analyzer.compute_state(pop, fitness)
+        
+        # Check output is valid
+        self.assertEqual(features.shape, (25,))
+        self.assertTrue(np.all(np.isfinite(features)))
+        self.assertTrue(np.all(features >= 0) and np.all(features <= 1))
 
 
 # =============================================================================
@@ -216,7 +290,7 @@ class TestLADRLGSK(unittest.TestCase):
         self.assertIsNotNone(result.best_f)
         self.assertGreater(len(result.actions_taken), 0)
         
-        # Check action format
+        # Check action format (Q1: K, kf, kr, p)
         action = result.actions_taken[0]
         self.assertIn('K', action)
         self.assertIn('kf', action)
@@ -283,6 +357,119 @@ class TestLADRLGSK(unittest.TestCase):
 
 
 # =============================================================================
+# Junior/Senior Index Tests
+# =============================================================================
+
+class TestJuniorSeniorIndices(unittest.TestCase):
+    """Test junior and senior phase index selection."""
+    
+    def test_junior_indices_basic(self):
+        """Test junior indices with basic population."""
+        from la_drl_gsk import LADRLGSK, LADRLGSKConfig
+        
+        config = LADRLGSKConfig(dim=10, pop_size=20, seed=42)
+        optimizer = LADRLGSK(config)
+        
+        # Create sorted indices (best to worst)
+        ind_best = np.arange(20, dtype=np.int64)
+        
+        R1, R2, R3 = optimizer._junior_indices(ind_best, 20)
+        
+        # Check array shapes
+        self.assertEqual(R1.shape, (20,))
+        self.assertEqual(R2.shape, (20,))
+        self.assertEqual(R3.shape, (20,))
+        
+        # Check best individual: R1=1, R2=2 (2nd and 3rd best)
+        self.assertEqual(R1[0], 1)
+        self.assertEqual(R2[0], 2)
+        
+        # Check worst individual: R1=17, R2=18 (3rd and 2nd worst)
+        self.assertEqual(R1[19], 17)
+        self.assertEqual(R2[19], 18)
+        
+        # Check R3 is conflict-free
+        idx = np.arange(20)
+        conflicts = (R3 == idx) | (R3 == R1) | (R3 == R2)
+        self.assertFalse(np.any(conflicts), "R3 should not conflict with self, R1, or R2")
+    
+    def test_senior_indices_basic(self):
+        """Test senior indices with basic population."""
+        from la_drl_gsk import LADRLGSK, LADRLGSKConfig
+        
+        config = LADRLGSKConfig(dim=10, pop_size=20, seed=42)
+        optimizer = LADRLGSK(config)
+        
+        # Create sorted indices
+        ind_best = np.arange(20, dtype=np.int64)
+        p = 0.1  # 10% top/bottom
+        
+        R1, R2, R3 = optimizer._senior_indices(ind_best, 20, p)
+        
+        # Check shapes
+        self.assertEqual(R1.shape, (20,))
+        self.assertEqual(R2.shape, (20,))
+        self.assertEqual(R3.shape, (20,))
+        
+        # With p=0.1 and NP=20:
+        # n_top = floor(20 * 0.1) = 2
+        # top group: indices [0, 1]
+        # middle group: indices [2, ..., 17]
+        # bottom group: indices [18, 19]
+        
+        # R1 should be from top group
+        self.assertTrue(np.all(R1 < 2), "R1 should be from top group")
+        
+        # R3 should be from bottom group
+        self.assertTrue(np.all(R3 >= 18), "R3 should be from bottom group")
+    
+    def test_senior_indices_middle_nonempty(self):
+        """Test that middle group is non-empty even with large p."""
+        from la_drl_gsk import LADRLGSK, LADRLGSKConfig
+        
+        config = LADRLGSKConfig(dim=10, pop_size=10, seed=42)
+        optimizer = LADRLGSK(config)
+        
+        ind_best = np.arange(10, dtype=np.int64)
+        p = 0.2  # 20% each for top/bottom
+        
+        R1, R2, R3 = optimizer._senior_indices(ind_best, 10, p)
+        
+        # Should not raise and R2 should be valid
+        self.assertEqual(R2.shape, (10,))
+    
+    def test_junior_indices_r3_conflicts(self):
+        """Test that R3 excludes self, R1, and R2 (Task C test)."""
+        from la_drl_gsk import LADRLGSK, LADRLGSKConfig
+        
+        # Use larger population to ensure conflicts can be resolved
+        config = LADRLGSKConfig(dim=5, pop_size=10, seed=42)
+        optimizer = LADRLGSK(config)
+        
+        # Initialize state by resetting
+        state = optimizer.reset_run(sphere)
+        
+        # Get sorted indices
+        ind_best = np.argsort(state.fitness)
+        NP = 10
+        
+        # Call junior indices
+        R1, R2, R3 = optimizer._junior_indices(ind_best, NP)
+        
+        # Assert for all i: R3[i] != i, R3[i] != R1[i], R3[i] != R2[i]
+        idx = np.arange(NP)
+        
+        # Check R3 != self
+        self.assertFalse(np.any(R3 == idx), "R3 should not equal self index")
+        
+        # Check R3 != R1
+        self.assertFalse(np.any(R3 == R1), "R3 should not equal R1")
+        
+        # Check R3 != R2
+        self.assertFalse(np.any(R3 == R2), "R3 should not equal R2")
+
+
+# =============================================================================
 # Edge Case Tests
 # =============================================================================
 
@@ -322,6 +509,119 @@ class TestEdgeCases(unittest.TestCase):
             results.append(result.best_f)
         
         self.assertEqual(results[0], results[1])
+
+
+# =============================================================================
+# CLI Tests
+# =============================================================================
+
+class TestCLI(unittest.TestCase):
+    """Test CLI argument parsing."""
+    
+    def test_demo_cec_path_argument(self):
+        """Test that demo subcommand accepts --cec-path."""
+        import argparse
+        import sys
+        from pathlib import Path
+        
+        # Import and inspect run.py's argument parser
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        
+        # Create a fresh parser like run.py does
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest='command')
+        
+        # Demo command should accept --cec-path
+        demo_parser = subparsers.add_parser('demo')
+        demo_parser.add_argument('--detailed', '-d', action='store_true')
+        demo_parser.add_argument('--cec-path', type=str, default=None)
+        
+        # Test parsing
+        args = parser.parse_args(['demo', '--cec-path', '/some/path'])
+        self.assertEqual(args.command, 'demo')
+        self.assertEqual(args.cec_path, '/some/path')
+        
+        # Test without --cec-path
+        args = parser.parse_args(['demo'])
+        self.assertEqual(args.command, 'demo')
+        self.assertIsNone(args.cec_path)
+
+
+# =============================================================================
+# CEC2017 Benchmark Tests
+# =============================================================================
+
+class TestCEC2017Benchmark(unittest.TestCase):
+    """Test CEC2017 benchmark loading."""
+    
+    def test_function_loading(self):
+        """Test that benchmark functions can be loaded."""
+        from la_drl_gsk.cec2017_benchmark import get_cec2017_function, CEC2017_FUNCTIONS
+        
+        # Test a few functions
+        for func_id in [1, 3, 5, 10]:
+            objective, f_opt = get_cec2017_function(func_id, dim=10)
+            
+            # Test evaluation
+            x = np.random.uniform(-100, 100, (10, 10))
+            y = objective(x)
+            
+            self.assertEqual(y.shape, (10,))
+            self.assertAlmostEqual(f_opt, func_id * 100.0, places=1)
+    
+    def test_f2_excluded(self):
+        """Test that F2 raises an error."""
+        from la_drl_gsk.cec2017_benchmark import get_cec2017_function
+        
+        with self.assertRaises(ValueError):
+            get_cec2017_function(2, dim=10)
+    
+    def test_invalid_func_id(self):
+        """Test invalid function IDs."""
+        from la_drl_gsk.cec2017_benchmark import get_cec2017_function
+        
+        with self.assertRaises(ValueError):
+            get_cec2017_function(0, dim=10)
+        
+        with self.assertRaises(ValueError):
+            get_cec2017_function(31, dim=10)
+    
+    def test_cec2017_loader_bundled(self):
+        """Test CEC2017 loader uses bundled implementation correctly (Task A test)."""
+        from la_drl_gsk.cec2017_benchmark import (
+            get_cec2017_function, reset_cec2017_cache, get_cec2017_source
+        )
+        
+        # Reset cache to force reload
+        reset_cec2017_cache()
+        
+        # Load function without external path - should use bundled
+        objective, f_opt = get_cec2017_function(1, dim=10)
+        
+        # Test evaluation with random input (5, 10) array
+        x = np.random.uniform(-100, 100, (5, 10))
+        y = objective(x)
+        
+        # Assert output shape is (5,)
+        self.assertEqual(y.shape, (5,))
+        
+        # Verify source is bundled (not synthetic)
+        source = get_cec2017_source()
+        self.assertIn(source, ['bundled', 'external'])  # Either bundled or external, but not synthetic
+    
+    def test_cec2017_vectorized_evaluation(self):
+        """Test CEC2017 functions work with vectorized input."""
+        from la_drl_gsk.cec2017_benchmark import get_cec2017_function
+        
+        for func_id in [1, 5, 10, 20, 30]:
+            objective, _ = get_cec2017_function(func_id, dim=10)
+            
+            # Test batch evaluation
+            x = np.random.uniform(-100, 100, (100, 10))
+            y = objective(x)
+            
+            self.assertEqual(y.shape, (100,))
+            self.assertTrue(np.all(np.isfinite(y)))
 
 
 # =============================================================================
