@@ -1,0 +1,57 @@
+# ======================================================
+# LA-DRL-GSK - Windows (CPU-only, Intel MKL)
+# Python 3.11
+# ======================================================
+#
+# INSTALLATION (two steps required):
+#
+#   Step 1: Install PyTorch CPU from special index
+#   pip install torch==2.4.1+cpu torchvision==0.19.1+cpu torchaudio==2.4.1+cpu --index-url https://download.pytorch.org/whl/cpu
+#
+#   Step 2: Install other packages
+#   pip install -r requirements-windows.txt
+#
+# ======================================================
+
+# ----------------------
+# Scientific computing
+# ----------------------
+numpy>=1.26,<3.0
+scipy>=1.11
+pandas>=2.0
+
+# ----------------------
+# PyTorch (CPU, MKL)
+# ----------------------
+# IMPORTANT: Install SEPARATELY with special index URL:
+# pip install torch==2.4.1+cpu torchvision==0.19.1+cpu torchaudio==2.4.1+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# ----------------------
+# Visualization
+# ----------------------
+matplotlib>=3.8
+seaborn>=0.13
+
+# ----------------------
+# Utilities
+# ----------------------
+tqdm>=4.66
+
+# ----------------------
+# Testing
+# ----------------------
+pytest>=8.0
+pytest-cov>=4.1
+
+# ----------------------
+# Code quality
+# ----------------------
+black>=24.0
+flake8>=7.0
+mypy>=1.8
+
+# ----------------------
+# Jupyter
+# ----------------------
+jupyter>=1.0
+ipywidgets>=8.1
